@@ -1,6 +1,3 @@
-from collections import deque
-from copy import copy
-
 from django.db.models.loading import cache
 from django.template import TemplateSyntaxError
 
@@ -13,102 +10,41 @@ class Parser(object):
         self.function = function
     
     def __call__(self, parser, token):
-        # we're going to be doing pop(0) a bit, so a deque is way more 
-        # efficient
-        bits = deque(token.split_contents())
+        bits = token.split_contents()
         # pop the name of the tag off
-        tag_name = bits.popleft()
-        pieces = []
+        tag_name = bits.pop(0)
+        pieces = {}
         error = False
-        for part in self.syntax:
-            try:
-                result = part.parse(parser, bits)
-            except TemplateSyntaxError:
-                error = True
-                break
-            if result is None:
-                continue
-            pieces.extend(result)
-        if bits or error:
-            raise TemplateSyntaxError("%s has the following syntax: {%% %s %s %%}" % (
-                tag_name,
-                tag_name,
-                " ".join(part.syntax() for part in self.syntax),
-            ))
-        return SugarNode(pieces, self.function)
+
+        for key in self.syntax.keys():
+            
+            if key.name in bits:
+                # Get the value for the key , this should always be the next element
+                value = bits.pop(bits.index(key.name) + 1 )
+                bits.pop(bits.index(key.name))
+                pieces[key.name] =  self.syntax[key].parse(value)
+            else:
+                #if the key is required (Required subclass) and not present throw an exception
+                if isinstance(key , Required):
+                    raise TemplateSyntaxError()
 
 
-class Parsable(object):
-    def resolve(self, context, value):
-        return value
+        return SugarNode(pieces, bits, self.function)
 
-class NamedParsable(Parsable):
+class NamedParsable(object):
     def __init__(self, name=None):
         self.name = name
     
-    def syntax(self):
-        if self.name:
-            return "<%s>" % self.name
-        return "<arg>"
-
-class Constant(Parsable):
-    def __init__(self, text):
-        self.text = text
-
-    def syntax(self):
-        return self.text
+class Required(NamedParsable):
+    pass
     
-    def parse(self, parser, bits):
-        if not bits:
-            raise TemplateSyntaxError
-        if bits[0] == self.text:
-            bits.popleft()
-            return None
-        raise TemplateSyntaxError
-    
+class Optional(NamedParsable):
+    pass
 
 class Variable(NamedParsable):
-    def parse(self, parser, bits):
-        bit = bits.popleft()
-        val = parser.compile_filter(bit)
-        return [(self, self.name, val)]
+    def parse(self, bit):
+        return bit
     
-    def resolve(self, context, value):
-        return value.resolve(context)
-
-class Name(NamedParsable):
-    def parse(self, parser, bits):
-        bit = bits.popleft()
-        return [(self, self.name, bit)]
-
-
-class Optional(Parsable):
-    def __init__(self, parts):
-        self.parts = parts
-    
-    def syntax(self):
-        return "[%s]" % (" ".join(part.syntax() for part in self.parts))
-    
-    def parse(self, parser, bits):
-        result = []
-        # we make a copy so that if part way through the optional part it
-        # doesn't match no changes are made
-        bits_copy = copy(bits)
-        for part in self.parts:
-            try:
-                val = part.parse(parser, bits_copy)
-                if val is None:
-                    continue
-                result.extend(val)
-            except (TemplateSyntaxError, IndexError):
-                return None
-        # however many bits we popped off our copy pop off the real one
-        diff = len(bits) - len(bits_copy)
-        for _ in xrange(diff):
-            bits.popleft()
-        return result
-
-
 class Model(NamedParsable):
     def parse(self, parser, bits):
         bit = bits.popleft()
